@@ -229,45 +229,102 @@ async function uploadImage(imageUrl) {
   }
 }
 
-// ============ 图片搜索（MTOP方式）============
+// ============ 图片搜索（MTOP方式 - 基于ai-reverse逆向分析）============
+// 使用 mtop.relationrecommend.WirelessRecommend.recommend (v2.0)
+// 方法: imageSimilarSearchV2 → 直接传图片URL搜索，无需上传
+// 参考: https://github.com/QuoVadis86/ai-reverse
 async function searchByImageMtop(imageUrl, page = 1) {
   try {
-    // 1. 先尝试无代理直连MTOP（比代理快10倍）
+    const APP_ID = 32517;
+    const params = {
+      method: 'imageSimilarSearchV2',
+      beginPage: page,
+      pageSize: 20,
+      imageAddress: imageUrl,
+      searchScene: 'pcImageSearch',
+      appName: 'pctusou',
+    };
+    const data = { appId: APP_ID, params: JSON.stringify(params) };
+    const apiConfig = { api: 'mtop.relationrecommend.WirelessRecommend.recommend', v: '2.0' };
+    
+    // 1. 先尝试无代理直连MTOP
     const directSession = new MTOPSession(null);
-    const directResult = await directSession.request(
-      { api: 'mtop.1688.alipictures.search', v: '1.0' },
-      { imageUrl, page, pageSize: 20, searchType: 'image', scene: 'imageSearch' },
-      { maxRetries: 1 }
-    );
+    const directResult = await directSession.request(apiConfig, data, { maxRetries: 1 });
     if (directResult.success && directResult.data) {
-      console.log('[ImgSearch] MTOP直连成功');
-      return parseSearchResult(directResult.data);
+      console.log('[ImgSearch] MTOP直连成功 (imageSimilarSearchV2)');
+      return parseImageSearchResult(directResult.data);
     }
     
-    // 2. 直连失败，尝试多个MTOP API（带代理，快速）
-    const apiConfigs = [
-      { api: 'mtop.1688.alipictures.search', v: '1.0', data: { imageUrl, page, pageSize: 20, searchType: 'image', scene: 'imageSearch' } },
-      { api: 'mtop.1688.image.search', v: '1.0', data: { imgUrl: imageUrl, pageNo: page, pageSize: 20 } },
-      { api: 'mtop.alibaba.image.search', v: '1.0', data: { imgUrl: imageUrl, pageNo: page, pageSize: 20 } },
-      { api: 'mtop.1688.youyuan.search', v: '1.0', data: { imageUrl, page, pageSize: 20 } },
-    ];
-    
-    for (const apiConfig of apiConfigs) {
-      const result = await requestWithProxyRace(
-        async (session, signal) => {
-          return await session.request(apiConfig, apiConfig.data, { abortSignal: signal, maxRetries: 1 });
-        },
-        { concurrentProxies: 3, maxRounds: 2 }
-      );
-      if (result.success && result.data) {
-        console.log(`[ImgSearch] MTOP代理成功: ${apiConfig.api}`);
-        return parseSearchResult(result.data);
-      }
+    // 2. 直连失败，尝试带代理
+    const proxyResult = await requestWithProxyRace(
+      async (session, signal) => {
+        return await session.request(apiConfig, data, { abortSignal: signal, maxRetries: 1 });
+      },
+      { concurrentProxies: 3, maxRounds: 2 }
+    );
+    if (proxyResult.success && proxyResult.data) {
+      console.log('[ImgSearch] MTOP代理成功 (imageSimilarSearchV2)');
+      return parseImageSearchResult(proxyResult.data);
     }
+    
     return { success: false, error: 'MTOP图片搜索API失败', fallback: true };
   } catch (e) {
     return { success: false, error: `MTOP异常: ${e.message}`, fallback: true };
   }
+}
+
+// 解析图片搜索结果（基于ai-reverse的响应结构）
+function parseImageSearchResult(data) {
+  try {
+    // 响应结构: data.data.OFFER 或 data.data.OFFER.items
+    const offer = data?.data?.OFFER || data?.OFFER || {};
+    const items = offer?.items || offer?.itemList || [];
+    const total = offer?.found || offer?.total || items.length;
+    
+    const products = [];
+    for (const item of items) {
+      if (!item) continue;
+      const product = extractImageProductFields(item);
+      if (product.offerId || product.title) {
+        products.push(product);
+      }
+    }
+    
+    return {
+      success: true,
+      data_version: '1.1',
+      total,
+      page: 1,
+      pageSize: 20,
+      products,
+      source: 'mtop_image',
+    };
+  } catch (e) {
+    return { success: false, error: `解析图片搜索结果失败: ${e.message}` };
+  }
+}
+
+// 提取图片搜索结果中的商品字段
+function extractImageProductFields(item) {
+  // 从 trackInfo.expoData 中提取商品信息
+  const expo = item?.trackInfo?.expoData || item?.expoData || {};
+  const offer = item?.offer || item?.offerInfo || {};
+  
+  return {
+    offerId: item.offerId || expo.offerId || offer.offerId || '',
+    title: item.title || expo.subject || offer.subject || item.subject || '',
+    price: item.price || expo.price || offer.price || '',
+    image: item.image || item.imageUrl || expo.image || expo.imgUrl || '',
+    url: item.url || item.detailUrl || expo.detailUrl || offer.detailUrl || '',
+    seller: item.sellerName || expo.sellerName || offer.sellerName || '',
+    company: item.companyName || expo.companyName || '',
+    sales: item.sales || expo.sales30 || offer.sales30 || 0,
+    minOrder: item.minOrderQuantity || expo.minOrderQuantity || offer.minOrderQuantity || 1,
+    isGoldSupplier: item.isGoldSupplier || expo.isGoldSupplier || false,
+    area: item.area || expo.area || '',
+    score: item.score || expo.score || 0,
+    source: 'mtop_image',
+  };
 }
 
 // ============ 图片搜索（H5页面方式 - 改进版）============
@@ -716,29 +773,52 @@ async function uploadImageByUrl(imageUrl) {
   return await uploadImage(imageUrl);
 }
 
-// 图片搜索 - 高级搜索（自动尝试MTOP→H5→增强解析）
+// 图片搜索 - 高级搜索（自动尝试MTOP→H5→增强解析，总超时30秒）
 async function searchImageAdvanced(imageUrl, page = 1) {
+  const startTime = Date.now();
+  const MAX_TOTAL_MS = 30000; // 总超时30秒
+  
   try {
     // 尝试MTOP方式
     console.log(`[ImgSearch] 开始搜索: ${imageUrl.substring(0, 80)}`);
-    const mtopResult = await searchByImageMtop(imageUrl, page);
+    const mtopResult = await timeLimit(
+      searchByImageMtop(imageUrl, page),
+      Math.min(MAX_TOTAL_MS / 2, 15000) // MTOP最多15秒
+    );
     if (mtopResult.success) return mtopResult;
     console.log(`[ImgSearch] MTOP失败: ${mtopResult.error}`);
     
+    // 检查是否已超时
+    if (Date.now() - startTime >= MAX_TOTAL_MS) {
+      return { success: false, error: `搜索超时: MTOP(${mtopResult.error})` };
+    }
+    
     // 尝试H5页面方式
     console.log('[ImgSearch] 尝试H5页面方式...');
-    const h5Result = await searchByImageH5(imageUrl, page);
+    const remainingTime = MAX_TOTAL_MS - (Date.now() - startTime);
+    const h5Result = await timeLimit(
+      searchByImageH5(imageUrl, page),
+      remainingTime
+    );
     if (h5Result.success) {
       console.log(`[ImgSearch] H5成功: ${h5Result.products.length} 个商品`);
       return h5Result;
     }
     console.log(`[ImgSearch] H5失败: ${h5Result.error}`);
     
-    // 都失败，返回详细错误
-    return { success: false, error: `搜索失败: MTOP(${mtopResult.error}), H5(${h5Result.error})` };
+    return { success: false, error: `搜索失败: MTOP(${mtopResult.error}), H5(${h5Result.error})`, data_version: '1.1' };
   } catch (e) {
-    return { success: false, error: `图片搜索异常: ${e.message}` };
+    return { success: false, error: `图片搜索异常: ${e.message}`, data_version: '1.1' };
   }
+}
+
+// 带超时的Promise包装
+function timeLimit(promise, ms) {
+  if (ms <= 0) return Promise.resolve({ success: false, error: '搜索超时' });
+  return Promise.race([
+    promise,
+    new Promise(resolve => setTimeout(() => resolve({ success: false, error: `搜索超时(${ms}ms)` }), ms))
+  ]);
 }
 
 // 图片搜索 - 通过图片ID
