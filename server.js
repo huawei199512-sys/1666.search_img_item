@@ -40,6 +40,7 @@ app.get('/', (req, res) => {
     endpoints: {
       upload: 'GET /api/image/upload?imageUrl=https://... → 图片ID',
       search: 'GET /api/image/search?image_id=xxx&page=1 → 搜索结果',
+      search_direct: 'GET /api/image/search/direct?imageUrl=https://...&page=1 → 搜索结果（无需上传）',
       proxy_status: 'GET /api/proxy/status',
       proxy_refresh: 'POST /api/proxy/refresh',
     },
@@ -105,6 +106,34 @@ app.get('/api/image/search', async (req, res) => {
   }
 });
 
+// ============ 快捷图片搜索（直接传imageUrl） ============
+app.get('/api/image/search/direct', async (req, res) => {
+  try {
+    const { imageUrl, page = 1 } = req.query;
+    if (!imageUrl) {
+      return res.status(400).json({ success: false, error: '请提供imageUrl参数' });
+    }
+    console.log(`[SearchDirect] 直接图片搜索: url=${imageUrl.substring(0, 100)}, page=${page}`);
+    const result = await scraperImg.searchByImageUrl(decodeURIComponent(imageUrl), parseInt(page) || 1);
+    if (result.success) {
+      res.json({
+        success: true,
+        data_version: '1.0',
+        total: result.total,
+        page: result.page,
+        pageSize: result.pageSize,
+        products: result.products,
+        source: result.source || 'mtop',
+      });
+    } else {
+      res.status(500).json({ success: false, error: result.error });
+    }
+  } catch (error) {
+    console.error('[SearchDirect] 异常:', error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // ============ 代理状态 ============
 app.get('/api/proxy/status', (req, res) => {
   try {
@@ -132,6 +161,7 @@ app.use((req, res) => {
     available_endpoints: {
       upload: 'GET /api/image/upload?imageUrl=https://...',
       search: 'GET /api/image/search?image_id=xxx&page=1',
+      search_direct: 'GET /api/image/search/direct?imageUrl=https://...&page=1',
       proxy_status: 'GET /api/proxy/status',
       proxy_refresh: 'POST /api/proxy/refresh',
     },

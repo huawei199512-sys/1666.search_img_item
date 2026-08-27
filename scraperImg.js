@@ -471,6 +471,7 @@ function parseProductListFromHtmlEnhanced(html) {
         offerIds.push(match[1]);
       }
     }
+    console.log(`[ImgSearch] H5解析: 找到 ${offerIds.length} 个offerId`);
     
     // 方式2: 提取商品标题（从HTML中）
     const titleRegex = /(?:alt|title)="([^"]{5,})"/g;
@@ -672,19 +673,39 @@ async function uploadImageByUrl(imageUrl) {
   return await uploadImage(imageUrl);
 }
 
-// 图片搜索 - 接受图片ID，返回搜索结果
-async function searchByImageId(imageId, page = 1) {
+// 图片搜索 - 高级搜索（自动尝试MTOP→H5→增强解析）
+async function searchImageAdvanced(imageUrl, page = 1) {
   try {
-    // 查找图片
-    const stored = imageStore.get(imageId);
-    if (!stored) {
-      return { success: false, error: '图片ID不存在' };
-    }
-    const imageUrl = stored.url;
-    // 先尝试MTOP方式，失败则回退到H5页面
+    // 尝试MTOP方式
+    console.log(`[ImgSearch] 开始搜索: ${imageUrl.substring(0, 80)}`);
     const mtopResult = await searchByImageMtop(imageUrl, page);
     if (mtopResult.success) return mtopResult;
-    return await searchByImageH5(imageUrl, page);
+    console.log(`[ImgSearch] MTOP失败: ${mtopResult.error}`);
+    
+    // 尝试H5页面方式
+    console.log('[ImgSearch] 尝试H5页面方式...');
+    const h5Result = await searchByImageH5(imageUrl, page);
+    if (h5Result.success) {
+      console.log(`[ImgSearch] H5成功: ${h5Result.products.length} 个商品`);
+      return h5Result;
+    }
+    console.log(`[ImgSearch] H5失败: ${h5Result.error}`);
+    
+    // 都失败，返回详细错误
+    return { success: false, error: `搜索失败: MTOP(${mtopResult.error}), H5(${h5Result.error})` };
+  } catch (e) {
+    return { success: false, error: `图片搜索异常: ${e.message}` };
+  }
+}
+
+// 图片搜索 - 通过图片ID
+async function searchByImageId(imageId, page = 1) {
+  try {
+    const stored = imageStore.get(imageId);
+    if (!stored) {
+      return { success: false, error: '图片ID不存在，请先上传图片' };
+    }
+    return await searchImageAdvanced(stored.url, page);
   } catch (e) {
     return { success: false, error: `图片搜索失败: ${e.message}` };
   }
@@ -692,13 +713,7 @@ async function searchByImageId(imageId, page = 1) {
 
 // 图片搜索 - 直接接受图片URL
 async function searchByImageUrl(imageUrl, page = 1) {
-  try {
-    const mtopResult = await searchByImageMtop(imageUrl, page);
-    if (mtopResult.success) return mtopResult;
-    return await searchByImageH5(imageUrl, page);
-  } catch (e) {
-    return { success: false, error: `图片搜索失败: ${e.message}` };
-  }
+  return await searchImageAdvanced(imageUrl, page);
 }
 
 // 代理状态
