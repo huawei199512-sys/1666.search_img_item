@@ -232,89 +232,106 @@ async function uploadImage(imageUrl) {
 // ============ 图片搜索（MTOP方式）============
 async function searchByImageMtop(imageUrl, page = 1) {
   try {
-    // 尝试MTOP图片搜索API
     const apiConfig = { api: 'mtop.1688.alipictures.search', v: '1.0' };
-    const data = {
-      imageUrl: imageUrl,
-      page: page,
-      pageSize: 20,
-      // 图片搜索参数
-      searchType: 'image',
-      scene: 'imageSearch',
-    };
+    const data = { imageUrl, page, pageSize: 20, searchType: 'image', scene: 'imageSearch' };
     const result = await requestWithProxyRace(
       async (session, signal) => {
         return await session.request(apiConfig, data, { abortSignal: signal, maxRetries: 1 });
       },
-      { concurrentProxies: 3, maxRounds: 5 }
+      { concurrentProxies: 3, maxRounds: 3 }
     );
     if (result.success && result.data) {
       return parseSearchResult(result.data);
     }
-    // 尝试其他可能的MTOP API
-    const apiConfig2 = { api: 'mtop.alibaba.image.search', v: '1.0' };
-    const data2 = { imgUrl: imageUrl, pageNo: page, pageSize: 20 };
-    const result2 = await requestWithProxyRace(
-      async (session, signal) => {
-        return await session.request(apiConfig2, data2, { abortSignal: signal, maxRetries: 1 });
-      },
-      { concurrentProxies: 3, maxRounds: 3 }
-    );
-    if (result2.success && result2.data) {
-      return parseSearchResult(result2.data);
-    }
-    return { success: false, error: 'MTOP图片搜索API失败，尝试H5页面...', fallback: true };
+    return { success: false, error: 'MTOP图片搜索API失败', fallback: true };
   } catch (e) {
-    return { success: false, error: `MTOP图片搜索异常: ${e.message}`, fallback: true };
+    return { success: false, error: `MTOP异常: ${e.message}`, fallback: true };
   }
 }
 
-// ============ 图片搜索（H5页面方式）============
+// ============ 图片搜索（H5页面方式 - 改进版）============
 async function searchByImageH5(imageUrl, page = 1) {
   try {
     const encodedUrl = encodeURIComponent(imageUrl);
     const searchUrl = `https://m.1688.com/offerSearch.html?imageUrl=${encodedUrl}&page=${page}`;
-    const result = await requestWithProxyRace(
-      async (session, signal) => {
-        const headers = {
+    
+    // 尝试直接访问（无代理），再尝试代理方式
+    let html = null;
+    let directSuccess = false;
+    
+    // 方式1: 直连尝试（先不通过代理）
+    try {
+      const directResp = await axios.get(searchUrl, {
+        headers: {
           'User-Agent': MTOP_UA,
           'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
           'Accept-Language': 'zh-CN,zh;q=0.9',
           'Referer': 'https://m.1688.com/',
-        };
-        const axiosConfig = {
-          method: 'GET', url: searchUrl, headers,
-          timeout: 15000, signal,
-          validateStatus: () => true,
-        };
-        if (session.agent) { axiosConfig.httpsAgent = session.agent; axiosConfig.httpAgent = session.agent; }
-        const resp = await axios(axiosConfig);
-        if (resp.status !== 200) return { success: false, error: `HTTP ${resp.status}` };
-        return { success: true, data: resp.data };
-      },
-      { concurrentProxies: 3, maxRounds: 5 }
-    );
-    if (!result.success) return { success: false, error: result.error };
-    // 解析HTML页面
-    const html = result.data;
-    // 尝试从window.__INIT_DATA提取
+        },
+        timeout: 15000,
+        validateStatus: () => true,
+      });
+      if (directResp.status === 200 && directResp.data) {
+        html = directResp.data;
+        directSuccess = true;
+        console.log('[ImgSearch] H5直连成功');
+      }
+    } catch (e) {
+      console.log('[ImgSearch] H5直连失败，尝试代理方式...');
+    }
+    
+    // 方式2: 代理方式
+    if (!directSuccess) {
+      const result = await requestWithProxyRace(
+        async (session, signal) => {
+          const headers = {
+            'User-Agent': MTOP_UA,
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'zh-CN,zh;q=0.9',
+            'Referer': 'https://m.1688.com/',
+          };
+          const axiosConfig = {
+            method: 'GET', url: searchUrl, headers,
+            timeout: 15000, signal,
+            validateStatus: () => true,
+          };
+          if (session.agent) { axiosConfig.httpsAgent = session.agent; axiosConfig.httpAgent = session.agent; }
+          const resp = await axios(axiosConfig);
+          if (resp.status !== 200) return { success: false, error: `HTTP ${resp.status}` };
+          return { success: true, data: resp.data };
+        },
+        { concurrentProxies: 3, maxRounds: 5 }
+      );
+      if (result.success) {
+        html = result.data;
+      } else {
+        return { success: false, error: result.error || 'H5页面访问失败' };
+      }
+    }
+    
+    // 解析HTML页面 - 多层解析策略
+    // 策略1: 从window.__INIT_DATA提取
     const initDataMatch = html.match(/window\.__INIT_DATA__\s*=\s*(\{[\s\S]*?\});/);
     if (initDataMatch) {
       try {
         const initData = JSON.parse(initDataMatch[1]);
-        return parseH5SearchResult(initData, html);
+        const parsed = parseH5SearchResult(initData, html);
+        if (parsed.products && parsed.products.length > 0) return parsed;
       } catch {}
     }
-    // 尝试从JSON数据中提取搜索结果
-    const searchResultMatch = html.match(/searchResult\s*:\s*(\{[\s\S]*?\})\s*[,;]/);
-    if (searchResultMatch) {
+    
+    // 策略2: 从JSON-LD结构化数据提取
+    const ldJsonMatch = html.match(/<script[^>]*type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/);
+    if (ldJsonMatch) {
       try {
-        const searchData = JSON.parse(searchResultMatch[1]);
-        return parseH5SearchResult(searchData, html);
+        const ldData = JSON.parse(ldJsonMatch[1]);
+        const parsed = parseH5SearchResult(ldData, html);
+        if (parsed.products && parsed.products.length > 0) return parsed;
       } catch {}
     }
-    // 尝试从页面中提取商品列表
-    return parseProductListFromHtml(html);
+    
+    // 策略3: 从HTML中提取商品列表（增强正则）
+    return parseProductListFromHtmlEnhanced(html);
   } catch (e) {
     return { success: false, error: `H5图片搜索失败: ${e.message}` };
   }
@@ -406,28 +423,18 @@ function extractProductsFromArray(arr) {
 function parseProductListFromHtml(html) {
   const products = [];
   try {
-    // 匹配offerId模式: /offer/[0-9]+.html
     const offerIdRegex = /\/offer\/(\d+)\.html/gi;
     const seenIds = new Set();
     let match;
     while ((match = offerIdRegex.exec(html)) !== null) {
-      if (!seenIds.has(match[1])) {
-        seenIds.add(match[1]);
-      }
+      if (!seenIds.has(match[1])) seenIds.add(match[1]);
     }
-    // 匹配商品标题
     const titleRegex = /"subject"\s*:\s*"([^"]+)"/g;
     const titles = [];
-    while ((match = titleRegex.exec(html)) !== null) {
-      titles.push(match[1]);
-    }
-    // 匹配价格
+    while ((match = titleRegex.exec(html)) !== null) titles.push(match[1]);
     const priceRegex = /"price"\s*:\s*([\d.]+)/g;
     const prices = [];
-    while ((match = priceRegex.exec(html)) !== null) {
-      prices.push(parseFloat(match[1]));
-    }
-    // 合并数据
+    while ((match = priceRegex.exec(html)) !== null) prices.push(parseFloat(match[1]));
     const ids = Array.from(seenIds);
     for (let i = 0; i < Math.min(ids.length, 50); i++) {
       products.push({
@@ -446,6 +453,126 @@ function parseProductListFromHtml(html) {
     pageSize: 20,
     products,
     source: 'h5_regex',
+  };
+}
+
+// 增强版H5解析 - 从HTML DOM结构提取商品数据
+function parseProductListFromHtmlEnhanced(html) {
+  const products = [];
+  const seenIds = new Set();
+  try {
+    // 方式1: 提取offerId
+    const offerIdRegex = /\/offer\/(\d+)\.html/gi;
+    const offerIds = [];
+    let match;
+    while ((match = offerIdRegex.exec(html)) !== null) {
+      if (!seenIds.has(match[1])) {
+        seenIds.add(match[1]);
+        offerIds.push(match[1]);
+      }
+    }
+    
+    // 方式2: 提取商品标题（从HTML中）
+    const titleRegex = /(?:alt|title)="([^"]{5,})"/g;
+    const rawTitles = [];
+    while ((match = titleRegex.exec(html)) !== null) {
+      const t = match[1].trim();
+      if (t.length > 5 && !t.match(/^(https?:\/\/|\.\/)/) && !t.includes('img') && !t.includes('pic')) {
+        rawTitles.push(t);
+      }
+    }
+    
+    // 方式3: 提取价格（¥前缀）
+    const priceRegex = /[¥￥](\d+\.?\d*)/g;
+    const prices = [];
+    const seenPrices = new Set();
+    while ((match = priceRegex.exec(html)) !== null) {
+      const p = parseFloat(match[1]);
+      if (p > 0 && p < 999999 && !seenPrices.has(p)) {
+        seenPrices.add(p);
+        prices.push(p);
+      }
+    }
+    
+    // 方式4: 提取图片URL
+    const imgRegex = /<img[^>]+src="([^"]+\.(?:jpg|jpeg|png|webp))[^"]*"/gi;
+    const images = [];
+    const seenImgs = new Set();
+    while ((match = imgRegex.exec(html)) !== null) {
+      let url = match[1];
+      if (!url.startsWith('http')) {
+        if (url.startsWith('//')) url = 'https:' + url;
+        else continue;
+      }
+      if (!seenImgs.has(url)) {
+        seenImgs.add(url);
+        images.push(url);
+      }
+    }
+    
+    // 方式5: 提取销量（售xxx+）
+    const salesRegex = /售(\d+\.?\d*)(万)?[件批]?/g;
+    const sales = [];
+    while ((match = salesRegex.exec(html)) !== null) {
+      let s = parseFloat(match[1]);
+      if (match[2] === '万') s *= 10000;
+      sales.push(s);
+    }
+    
+    // 合并数据
+    const maxItems = Math.min(offerIds.length, 50);
+    for (let i = 0; i < maxItems; i++) {
+      const product = {
+        offerId: offerIds[i] || '',
+        title: '',
+        price: 0,
+        image: '',
+        sales: 0,
+        detailUrl: offerIds[i] ? `https://detail.1688.com/offer/${offerIds[i]}.html` : '',
+        source: 'h5_enhanced',
+      };
+      // 从HTML中查找该offerId附近的标题
+      if (offerIds[i]) {
+        const idx = html.indexOf(offerIds[i]);
+        if (idx > 0) {
+          const nearby = html.substring(Math.max(0, idx - 500), idx + 500);
+          // 查找附近的标题
+          const nearbyTitle = nearby.match(/alt="([^"]{8,})"/) || nearby.match(/title="([^"]{8,})"/);
+          if (nearbyTitle) product.title = nearbyTitle[1];
+          // 查找附近的价格
+          const nearbyPrice = nearby.match(/[¥￥](\d+\.?\d*)/);
+          if (nearbyPrice) product.price = parseFloat(nearbyPrice[1]);
+          // 查找附近的图片
+          const nearbyImg = nearby.match(/src="([^"]+\.(?:jpg|jpeg|png|webp))"/i);
+          if (nearbyImg) {
+            let imgUrl = nearbyImg[1];
+            if (imgUrl.startsWith('//')) imgUrl = 'https:' + imgUrl;
+            product.image = imgUrl;
+          }
+        }
+      }
+      // 如果上面没找到，用全局列表
+      if (!product.title && rawTitles[i]) product.title = rawTitles[i];
+      if (!product.price && prices[i]) product.price = prices[i];
+      if (!product.image && images[i]) product.image = images[i];
+      if (sales[i]) product.sales = sales[i];
+      
+      products.push(product);
+    }
+  } catch {}
+  
+  // 如果上面的方法都没找到，回退到简单版
+  if (products.length === 0) {
+    return parseProductListFromHtml(html);
+  }
+  
+  return {
+    success: products.length > 0,
+    total: products.length,
+    page: 1,
+    pageSize: 20,
+    products,
+    source: 'h5_enhanced',
   };
 }
 
@@ -554,19 +681,10 @@ async function searchByImageId(imageId, page = 1) {
       return { success: false, error: '图片ID不存在' };
     }
     const imageUrl = stored.url;
-    // 先尝试MTOP方式
+    // 先尝试MTOP方式，失败则回退到H5页面
     const mtopResult = await searchByImageMtop(imageUrl, page);
-    if (mtopResult.success) {
-      return mtopResult;
-    }
-    // 如果MTOP失败，尝试H5页面方式
-    console.log('[ImgSearch] MTOP失败，尝试H5页面方式...');
-    const h5Result = await searchByImageH5(imageUrl, page);
-    if (h5Result.success) {
-      return h5Result;
-    }
-    // 返回MTOP的错误信息（更详细）
-    return mtopResult;
+    if (mtopResult.success) return mtopResult;
+    return await searchByImageH5(imageUrl, page);
   } catch (e) {
     return { success: false, error: `图片搜索失败: ${e.message}` };
   }
@@ -577,7 +695,6 @@ async function searchByImageUrl(imageUrl, page = 1) {
   try {
     const mtopResult = await searchByImageMtop(imageUrl, page);
     if (mtopResult.success) return mtopResult;
-    console.log('[ImgSearch] MTOP失败，尝试H5页面方式...');
     return await searchByImageH5(imageUrl, page);
   } catch (e) {
     return { success: false, error: `图片搜索失败: ${e.message}` };

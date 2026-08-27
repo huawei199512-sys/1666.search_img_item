@@ -38,7 +38,7 @@ app.get('/', (req, res) => {
       search_strategy: 'MTOP API → H5页面 → 正则提取',
     },
     endpoints: {
-      upload: 'POST /api/image/upload { "imageUrl": "https://..." } → 图片ID',
+      upload: 'GET /api/image/upload?imageUrl=https://... → 图片ID',
       search: 'GET /api/image/search?image_id=xxx&page=1 → 搜索结果',
       proxy_status: 'GET /api/proxy/status',
       proxy_refresh: 'POST /api/proxy/refresh',
@@ -47,10 +47,10 @@ app.get('/', (req, res) => {
   });
 });
 
-// ============ 图片上传 ============
-app.post('/api/image/upload', async (req, res) => {
+// ============ 图片上传（GET方式，方便浏览器直接调用）============
+app.get('/api/image/upload', async (req, res) => {
   try {
-    const { imageUrl } = req.body;
+    const { imageUrl } = req.query;
     if (!imageUrl) {
       return res.status(400).json({ success: false, error: '请提供imageUrl参数' });
     }
@@ -130,7 +130,7 @@ app.use((req, res) => {
     success: false,
     error: '接口不存在',
     available_endpoints: {
-      upload: 'POST /api/image/upload { "imageUrl": "https://..." }',
+      upload: 'GET /api/image/upload?imageUrl=https://...',
       search: 'GET /api/image/search?image_id=xxx&page=1',
       proxy_status: 'GET /api/proxy/status',
       proxy_refresh: 'POST /api/proxy/refresh',
