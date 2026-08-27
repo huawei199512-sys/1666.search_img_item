@@ -273,18 +273,108 @@ async function searchByImageMtop(imageUrl, page = 1) {
   }
 }
 
-// 解析图片搜索结果（基于ai-reverse的响应结构）
+// 解析图片搜索结果（基于ai-reverse的响应结构，兼容多种格式）
 function parseImageSearchResult(data) {
   try {
-    // 响应结构: data.data.OFFER 或 data.data.OFFER.items
-    const offer = data?.data?.OFFER || data?.OFFER || {};
-    const items = offer?.items || offer?.itemList || [];
-    const total = offer?.found || offer?.total || items.length;
+    if (!data) return { success: false, error: '返回数据为空' };
     
+    // 打印原始数据结构用于调试
+    const keys = Object.keys(data);
+    console.log(`[ImgSearch] 响应顶层keys: ${keys.join(', ')}`);
+    if (data.data) {
+      const dataKeys = Object.keys(data.data);
+      console.log(`[ImgSearch] data层keys: ${dataKeys.join(', ')}`);
+      if (data.data.OFFER) {
+        const offerKeys = Object.keys(data.data.OFFER);
+        console.log(`[ImgSearch] OFFER层keys: ${offerKeys.join(', ')}`);
+      }
+    }
+    
+    // 尝试多种可能的items位置
+    let items = [];
+    let total = 0;
+    
+    // 位置1: data.data.OFFER.items (标准格式)
+    if (data?.data?.OFFER?.items) {
+      items = data.data.OFFER.items;
+      total = data.data.OFFER.found || data.data.OFFER.total || 0;
+      console.log(`[ImgSearch] 找到items: 位置1 (data.data.OFFER.items), 数量: ${items.length}, total: ${total}`);
+    }
+    // 位置2: data.data.OFFER 本身就是数组
+    else if (Array.isArray(data?.data?.OFFER)) {
+      items = data.data.OFFER;
+      total = items.length;
+      console.log(`[ImgSearch] 找到items: 位置2 (data.data.OFFER是数组), 数量: ${items.length}`);
+    }
+    // 位置3: data.data 本身就是数组
+    else if (Array.isArray(data?.data)) {
+      items = data.data;
+      total = items.length;
+      console.log(`[ImgSearch] 找到items: 位置3 (data.data是数组), 数量: ${items.length}`);
+    }
+    // 位置4: data.data.other 或 data.data.offerList
+    else if (data?.data?.offerList) {
+      items = data.data.offerList;
+      total = data.data.total || data.data.found || items.length;
+      console.log(`[ImgSearch] 找到items: 位置4 (data.data.offerList), 数量: ${items.length}`);
+    }
+    // 位置5: 直接搜索 data 中所有可能的数组字段
+    else {
+      for (const key of Object.keys(data.data || {})) {
+        if (Array.isArray(data.data[key]) && data.data[key].length > 0) {
+          items = data.data[key];
+          total = data.data.found || data.data.total || items.length;
+          console.log(`[ImgSearch] 找到items: 位置5 (data.data.${key}), 数量: ${items.length}`);
+          break;
+        }
+      }
+    }
+    
+    // 如果还是没有items，返回原始数据供调试
+    if (items.length === 0) {
+      const sample = JSON.stringify(data).substring(0, 500);
+      console.log(`[ImgSearch] 未找到items, 原始数据前500字: ${sample}`);
+      return {
+        success: true,
+        data_version: '1.1',
+        total,
+        page: 1,
+        pageSize: 20,
+        products: [],
+        source: 'mtop_image',
+        _rawKeys: keys,
+      };
+    }
+    
+    // 提取商品字段
     const products = [];
     for (const item of items) {
       if (!item) continue;
-      const product = extractImageProductFields(item);
+      // 尝试多种字段位置
+      const product = {};
+      // 标准字段
+      product.offerId = item.offerId || item.id || item.offer_id || '';
+      product.title = item.title || item.subject || item.offerSubject || item.name || '';
+      product.price = item.price || item.offerPrice || item.salePrice || item.minPrice || 0;
+      // 图片 - 多种格式
+      product.image = item.image || item.imageUrl || item.imgUrl || item.img || item.picUrl || '';
+      if (product.image && !product.image.startsWith('http')) {
+        product.image = `https:${product.image}`;
+      }
+      // URL
+      product.url = item.url || item.detailUrl || item.offerUrl || '';
+      if (product.offerId && !product.url) {
+        product.url = `https://detail.1688.com/offer/${product.offerId}.html`;
+      }
+      // 其他字段
+      product.seller = item.sellerName || item.shopName || item.shop || item.companyName || item.company || '';
+      product.sales = item.sales || item.sales30 || item.soldCount || item.monthSold || 0;
+      product.minOrder = item.minOrderQuantity || item.minOrderNum || item.minQuantity || 1;
+      product.isGoldSupplier = !!item.isGoldSupplier || !!item.isGold || !!item.goldSupplier;
+      product.area = item.area || item.region || item.province || '';
+      product.score = item.score || item.shopScore || item.rating || 0;
+      product.source = 'mtop_image';
+      
       if (product.offerId || product.title) {
         products.push(product);
       }
@@ -302,29 +392,6 @@ function parseImageSearchResult(data) {
   } catch (e) {
     return { success: false, error: `解析图片搜索结果失败: ${e.message}` };
   }
-}
-
-// 提取图片搜索结果中的商品字段
-function extractImageProductFields(item) {
-  // 从 trackInfo.expoData 中提取商品信息
-  const expo = item?.trackInfo?.expoData || item?.expoData || {};
-  const offer = item?.offer || item?.offerInfo || {};
-  
-  return {
-    offerId: item.offerId || expo.offerId || offer.offerId || '',
-    title: item.title || expo.subject || offer.subject || item.subject || '',
-    price: item.price || expo.price || offer.price || '',
-    image: item.image || item.imageUrl || expo.image || expo.imgUrl || '',
-    url: item.url || item.detailUrl || expo.detailUrl || offer.detailUrl || '',
-    seller: item.sellerName || expo.sellerName || offer.sellerName || '',
-    company: item.companyName || expo.companyName || '',
-    sales: item.sales || expo.sales30 || offer.sales30 || 0,
-    minOrder: item.minOrderQuantity || expo.minOrderQuantity || offer.minOrderQuantity || 1,
-    isGoldSupplier: item.isGoldSupplier || expo.isGoldSupplier || false,
-    area: item.area || expo.area || '',
-    score: item.score || expo.score || 0,
-    source: 'mtop_image',
-  };
 }
 
 // ============ 图片搜索（H5页面方式 - 改进版）============
