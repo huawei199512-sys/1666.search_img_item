@@ -223,7 +223,7 @@ async function uploadImage(imageUrl) {
       const oldest = imageStore.keys().next().value;
       imageStore.delete(oldest);
     }
-    return { success: true, data_version: '1.1', image_id: imageId, image_url: imageUrl, message: '图片上传成功' };
+    return { success: true, data_version: '1.1.2', image_id: imageId, image_url: imageUrl, message: '图片上传成功' };
 } catch (e) {
     return { success: false, error: `图片上传失败: ${e.message}` };
   }
@@ -320,29 +320,50 @@ function parseImageSearchResult(data) {
     }
     // 位置5: 直接搜索 data 中所有可能的数组字段
     else {
+      let found = false;
       for (const key of Object.keys(data.data || {})) {
         if (Array.isArray(data.data[key]) && data.data[key].length > 0) {
           items = data.data[key];
           total = data.data.found || data.data.total || items.length;
           console.log(`[ImgSearch] 找到items: 位置5 (data.data.${key}), 数量: ${items.length}`);
+          found = true;
           break;
+        }
+      }
+      // 位置6: 遍历 data.data 下所有嵌套对象的数组字段
+      if (!found) {
+        for (const key of Object.keys(data.data || {})) {
+          const val = data.data[key];
+          if (val && typeof val === 'object' && !Array.isArray(val)) {
+            for (const subKey of Object.keys(val)) {
+              if (Array.isArray(val[subKey]) && val[subKey].length > 0) {
+                items = val[subKey];
+                total = val.found || val.total || items.length;
+                console.log(`[ImgSearch] 找到items: 位置6 (data.data.${key}.${subKey}), 数量: ${items.length}`);
+                found = true;
+                break;
+              }
+            }
+          }
+          if (found) break;
         }
       }
     }
     
-    // 如果还是没有items，返回原始数据供调试
+    // 如果还是没有items，返回原始数据前500字用于调试
     if (items.length === 0) {
-      const sample = JSON.stringify(data).substring(0, 500);
-      console.log(`[ImgSearch] 未找到items, 原始数据前500字: ${sample}`);
+      const rawStr = JSON.stringify(data);
+      const sample = rawStr.substring(0, 800);
+      console.log(`[ImgSearch] 未找到items, 原始数据前800字: ${sample}`);
       return {
         success: true,
-        data_version: '1.1',
+        data_version: '1.1.2',
         total,
         page: 1,
         pageSize: 20,
         products: [],
         source: 'mtop_image',
-        _rawKeys: keys,
+        _debug: { rawSample: sample, keys },
       };
     }
     
@@ -350,29 +371,40 @@ function parseImageSearchResult(data) {
     const products = [];
     for (const item of items) {
       if (!item) continue;
-      // 尝试多种字段位置
+      
+      // 字段位置优先级:
+      // 1. trackInfo.expoData (图片搜索返回格式，ai-reverse确认)
+      // 2. item.data (关键词搜索返回格式)
+      // 3. item 本身 (兜底)
+      const expo = item?.trackInfo?.expoData || {};
+      const itemData = item?.data || {};
+      
       const product = {};
-      // 标准字段
-      product.offerId = item.offerId || item.id || item.offer_id || '';
-      product.title = item.title || item.subject || item.offerSubject || item.name || '';
-      product.price = item.price || item.offerPrice || item.salePrice || item.minPrice || 0;
-      // 图片 - 多种格式
-      product.image = item.image || item.imageUrl || item.imgUrl || item.img || item.picUrl || '';
+      product.offerId = expo.offerId || itemData.offerId || item.offerId || item.id || '';
+      product.title = expo.subject || itemData.title || item.title || item.subject || item.name || '';
+      product.price = expo.price || itemData.priceInfo?.price || itemData.price || item.price || 0;
+      // 图片
+      product.image = expo.imgUrl || expo.image || itemData.offerPicUrl || itemData.odPicUrl || 
+                      itemData.imageUrl || item.image || item.imageUrl || item.imgUrl || item.picUrl || '';
       if (product.image && !product.image.startsWith('http')) {
         product.image = `https:${product.image}`;
       }
       // URL
-      product.url = item.url || item.detailUrl || item.offerUrl || '';
+      product.url = expo.detailUrl || itemData.detailUrl || item.url || item.detailUrl || '';
       if (product.offerId && !product.url) {
         product.url = `https://detail.1688.com/offer/${product.offerId}.html`;
       }
       // 其他字段
-      product.seller = item.sellerName || item.shopName || item.shop || item.companyName || item.company || '';
-      product.sales = item.sales || item.sales30 || item.soldCount || item.monthSold || 0;
-      product.minOrder = item.minOrderQuantity || item.minOrderNum || item.minQuantity || 1;
-      product.isGoldSupplier = !!item.isGoldSupplier || !!item.isGold || !!item.goldSupplier;
-      product.area = item.area || item.region || item.province || '';
-      product.score = item.score || item.shopScore || item.rating || 0;
+      product.seller = expo.sellerName || itemData.shopName || itemData.loginId || 
+                       item.sellerName || item.shopName || item.companyName || '';
+      product.sales = expo.sales30 || itemData.bookedCount || itemData.saleNum || 
+                      item.sales || item.sales30 || 0;
+      product.minOrder = expo.minOrderQuantity || itemData.minOrderQuantity || 
+                         item.minOrderQuantity || item.minOrderNum || 1;
+      product.isGoldSupplier = !!expo.isGoldSupplier || !!itemData.isGoldSupplier || 
+                               !!item.isGoldSupplier || !!item.isGold || !!item.goldSupplier;
+      product.area = expo.area || itemData.area || item.area || item.region || '';
+      product.score = expo.score || itemData.score || item.score || item.shopScore || 0;
       product.source = 'mtop_image';
       
       if (product.offerId || product.title) {
@@ -382,7 +414,7 @@ function parseImageSearchResult(data) {
     
     return {
       success: true,
-      data_version: '1.1',
+      data_version: '1.1.2',
       total,
       page: 1,
       pageSize: 20,
@@ -532,7 +564,7 @@ function parseSearchResult(data) {
     }
     return {
       success: true,
-      data_version: '1.1',
+      data_version: '1.1.2',
       total: data.total || data.totalCount || data.totalResults || products.length,
       page: data.page || data.pageNo || 1,
       pageSize: data.pageSize || 20,
