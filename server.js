@@ -28,7 +28,7 @@ app.get('/health', (req, res) => {
 app.get('/', (req, res) => {
   res.json({
     service: '1688 Image Search API',
-    version: '1.0.0',
+    version: '1.1.0',
     description: '1688以图搜图API - 图片上传 + 图片搜索',
     mode: '无Cookie + 代理IP + MTOP逆向 + H5页面解析',
     features: {
@@ -64,7 +64,7 @@ app.get('/api/image/upload', async (req, res) => {
     if (result.success) {
       res.json({
         success: true,
-        data_version: '1.0',
+        data_version: '1.1',
         image_id: result.image_id,
         image_url: result.image_url,
         message: '图片上传成功',
@@ -90,7 +90,7 @@ app.get('/api/image/search', async (req, res) => {
     if (result.success) {
       res.json({
         success: true,
-        data_version: '1.0',
+        data_version: '1.1',
         total: result.total,
         page: result.page,
         pageSize: result.pageSize,
@@ -118,7 +118,7 @@ app.get('/api/image/search/direct', async (req, res) => {
     if (result.success) {
       res.json({
         success: true,
-        data_version: '1.0',
+        data_version: '1.1',
         total: result.total,
         page: result.page,
         pageSize: result.pageSize,

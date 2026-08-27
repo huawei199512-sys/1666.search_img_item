@@ -232,16 +232,25 @@ async function uploadImage(imageUrl) {
 // ============ 图片搜索（MTOP方式）============
 async function searchByImageMtop(imageUrl, page = 1) {
   try {
-    const apiConfig = { api: 'mtop.1688.alipictures.search', v: '1.0' };
-    const data = { imageUrl, page, pageSize: 20, searchType: 'image', scene: 'imageSearch' };
-    const result = await requestWithProxyRace(
-      async (session, signal) => {
-        return await session.request(apiConfig, data, { abortSignal: signal, maxRetries: 1 });
-      },
-      { concurrentProxies: 3, maxRounds: 3 }
-    );
-    if (result.success && result.data) {
-      return parseSearchResult(result.data);
+    // 尝试多个MTOP API
+    const apiConfigs = [
+      { api: 'mtop.1688.alipictures.search', v: '1.0', data: { imageUrl, page, pageSize: 20, searchType: 'image', scene: 'imageSearch' } },
+      { api: 'mtop.1688.image.search', v: '1.0', data: { imgUrl: imageUrl, pageNo: page, pageSize: 20 } },
+      { api: 'mtop.alibaba.image.search', v: '1.0', data: { imgUrl: imageUrl, pageNo: page, pageSize: 20 } },
+      { api: 'mtop.1688.youyuan.search', v: '1.0', data: { imageUrl, page, pageSize: 20 } },
+    ];
+    
+    for (const apiConfig of apiConfigs) {
+      const result = await requestWithProxyRace(
+        async (session, signal) => {
+          return await session.request(apiConfig, apiConfig.data, { abortSignal: signal, maxRetries: 1 });
+        },
+        { concurrentProxies: 2, maxRounds: 2 }
+      );
+      if (result.success && result.data) {
+        console.log(`[ImgSearch] MTOP成功: ${apiConfig.api}`);
+        return parseSearchResult(result.data);
+      }
     }
     return { success: false, error: 'MTOP图片搜索API失败', fallback: true };
   } catch (e) {
@@ -253,59 +262,78 @@ async function searchByImageMtop(imageUrl, page = 1) {
 async function searchByImageH5(imageUrl, page = 1) {
   try {
     const encodedUrl = encodeURIComponent(imageUrl);
-    const searchUrl = `https://m.1688.com/offerSearch.html?imageUrl=${encodedUrl}&page=${page}`;
     
-    // 尝试直接访问（无代理），再尝试代理方式
+    // 尝试多种URL格式
+    const searchUrls = [
+      `https://m.1688.com/offerSearch.html?imageUrl=${encodedUrl}&page=${page}`,
+      `https://s.1688.com/offerSearch.html?imageUrl=${encodedUrl}&page=${page}`,
+      `https://m.1688.com/offerSearch.html?imageUrl=${encodedUrl}`,
+    ];
+    
     let html = null;
     let directSuccess = false;
+    let lastError = null;
     
-    // 方式1: 直连尝试（先不通过代理）
-    try {
-      const directResp = await axios.get(searchUrl, {
-        headers: {
-          'User-Agent': MTOP_UA,
-          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-          'Accept-Language': 'zh-CN,zh;q=0.9',
-          'Referer': 'https://m.1688.com/',
-        },
-        timeout: 15000,
-        validateStatus: () => true,
-      });
-      if (directResp.status === 200 && directResp.data) {
-        html = directResp.data;
-        directSuccess = true;
-        console.log('[ImgSearch] H5直连成功');
+    for (const searchUrl of searchUrls) {
+      if (directSuccess) break;
+      
+      // 方式1: 直连尝试（先不通过代理）
+      try {
+        const directResp = await axios.get(searchUrl, {
+          headers: {
+            'User-Agent': MTOP_UA,
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'zh-CN,zh;q=0.9',
+            'Referer': 'https://m.1688.com/',
+          },
+          timeout: 20000,
+          validateStatus: () => true,
+        });
+        if (directResp.status === 200 && directResp.data && directResp.data.length > 1000) {
+          html = directResp.data;
+          directSuccess = true;
+          console.log(`[ImgSearch] H5直连成功: ${searchUrl.substring(0, 80)}`);
+        } else {
+          lastError = `HTTP ${directResp.status} 或数据为空`;
+        }
+      } catch (e) {
+        lastError = e.message;
+        console.log(`[ImgSearch] H5直连失败: ${e.message}`);
       }
-    } catch (e) {
-      console.log('[ImgSearch] H5直连失败，尝试代理方式...');
     }
     
     // 方式2: 代理方式
     if (!directSuccess) {
-      const result = await requestWithProxyRace(
+      console.log('[ImgSearch] H5直连全部失败，尝试代理方式...');
+      // 尝试MTOP Session方式访问（使用MTOP cookie）
+      const mtopResult = await requestWithProxyRace(
         async (session, signal) => {
+          // 先确保登录
+          await session.login(signal);
           const headers = {
             'User-Agent': MTOP_UA,
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
             'Accept-Language': 'zh-CN,zh;q=0.9',
             'Referer': 'https://m.1688.com/',
           };
+          if (session.cookieStr) headers['Cookie'] = session.cookieStr;
           const axiosConfig = {
-            method: 'GET', url: searchUrl, headers,
-            timeout: 15000, signal,
+            method: 'GET', url: searchUrls[0], headers,
+            timeout: 20000, signal,
             validateStatus: () => true,
           };
           if (session.agent) { axiosConfig.httpsAgent = session.agent; axiosConfig.httpAgent = session.agent; }
           const resp = await axios(axiosConfig);
           if (resp.status !== 200) return { success: false, error: `HTTP ${resp.status}` };
+          if (!resp.data || resp.data.length < 1000) return { success: false, error: '返回数据为空或过短' };
           return { success: true, data: resp.data };
         },
         { concurrentProxies: 3, maxRounds: 5 }
       );
-      if (result.success) {
-        html = result.data;
+      if (mtopResult.success) {
+        html = mtopResult.data;
       } else {
-        return { success: false, error: result.error || 'H5页面访问失败' };
+        return { success: false, error: `H5页面访问失败: ${mtopResult.error || lastError || '未知错误'}` };
       }
     }
     
@@ -453,6 +481,7 @@ function parseProductListFromHtml(html) {
     pageSize: 20,
     products,
     source: 'h5_regex',
+    error: products.length > 0 ? undefined : '未从HTML中解析到商品数据',
   };
 }
 
@@ -574,6 +603,7 @@ function parseProductListFromHtmlEnhanced(html) {
     pageSize: 20,
     products,
     source: 'h5_enhanced',
+    error: products.length > 0 ? undefined : '未从HTML中解析到商品数据',
   };
 }
 
