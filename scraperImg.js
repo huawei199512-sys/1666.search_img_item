@@ -12,9 +12,9 @@ const MTOP_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537
 
 // 超时与并发策略
 const SINGLE_PROXY_TIMEOUT = 12000;
-const TOTAL_REQUEST_TIMEOUT = 60000;
+const TOTAL_REQUEST_TIMEOUT = 30000;
 const CONCURRENT_PROXIES = 3;
-const MAX_ROUNDS = 8;
+const MAX_ROUNDS = 3;
 
 // 图片存储（内存Map）
 const imageStore = new Map();
@@ -223,8 +223,8 @@ async function uploadImage(imageUrl) {
       const oldest = imageStore.keys().next().value;
       imageStore.delete(oldest);
     }
-    return { success: true, image_id: imageId, image_url: imageUrl };
-  } catch (e) {
+    return { success: true, data_version: '1.1', image_id: imageId, image_url: imageUrl, message: '图片上传成功' };
+} catch (e) {
     return { success: false, error: `图片上传失败: ${e.message}` };
   }
 }
@@ -232,7 +232,19 @@ async function uploadImage(imageUrl) {
 // ============ 图片搜索（MTOP方式）============
 async function searchByImageMtop(imageUrl, page = 1) {
   try {
-    // 尝试多个MTOP API
+    // 1. 先尝试无代理直连MTOP（比代理快10倍）
+    const directSession = new MTOPSession(null);
+    const directResult = await directSession.request(
+      { api: 'mtop.1688.alipictures.search', v: '1.0' },
+      { imageUrl, page, pageSize: 20, searchType: 'image', scene: 'imageSearch' },
+      { maxRetries: 1 }
+    );
+    if (directResult.success && directResult.data) {
+      console.log('[ImgSearch] MTOP直连成功');
+      return parseSearchResult(directResult.data);
+    }
+    
+    // 2. 直连失败，尝试多个MTOP API（带代理，快速）
     const apiConfigs = [
       { api: 'mtop.1688.alipictures.search', v: '1.0', data: { imageUrl, page, pageSize: 20, searchType: 'image', scene: 'imageSearch' } },
       { api: 'mtop.1688.image.search', v: '1.0', data: { imgUrl: imageUrl, pageNo: page, pageSize: 20 } },
@@ -245,10 +257,10 @@ async function searchByImageMtop(imageUrl, page = 1) {
         async (session, signal) => {
           return await session.request(apiConfig, apiConfig.data, { abortSignal: signal, maxRetries: 1 });
         },
-        { concurrentProxies: 2, maxRounds: 2 }
+        { concurrentProxies: 3, maxRounds: 2 }
       );
       if (result.success && result.data) {
-        console.log(`[ImgSearch] MTOP成功: ${apiConfig.api}`);
+        console.log(`[ImgSearch] MTOP代理成功: ${apiConfig.api}`);
         return parseSearchResult(result.data);
       }
     }
@@ -302,11 +314,11 @@ async function searchByImageH5(imageUrl, page = 1) {
       }
     }
     
-    // 方式2: 代理方式
+    // 方式2: 代理方式（最大3轮，每轮3个并发）
     if (!directSuccess) {
       console.log('[ImgSearch] H5直连全部失败，尝试代理方式...');
       // 尝试MTOP Session方式访问（使用MTOP cookie）
-      const mtopResult = await requestWithProxyRace(
+      const result = await requestWithProxyRace(
         async (session, signal) => {
           // 先确保登录
           await session.login(signal);
@@ -319,7 +331,7 @@ async function searchByImageH5(imageUrl, page = 1) {
           if (session.cookieStr) headers['Cookie'] = session.cookieStr;
           const axiosConfig = {
             method: 'GET', url: searchUrls[0], headers,
-            timeout: 20000, signal,
+            timeout: 15000, signal,
             validateStatus: () => true,
           };
           if (session.agent) { axiosConfig.httpsAgent = session.agent; axiosConfig.httpAgent = session.agent; }
@@ -328,12 +340,12 @@ async function searchByImageH5(imageUrl, page = 1) {
           if (!resp.data || resp.data.length < 1000) return { success: false, error: '返回数据为空或过短' };
           return { success: true, data: resp.data };
         },
-        { concurrentProxies: 3, maxRounds: 5 }
+        { concurrentProxies: 2, maxRounds: 2 }
       );
-      if (mtopResult.success) {
-        html = mtopResult.data;
+      if (result.success) {
+        html = result.data;
       } else {
-        return { success: false, error: `H5页面访问失败: ${mtopResult.error || lastError || '未知错误'}` };
+        return { success: false, error: `H5页面访问失败: ${result.error || lastError || '未知错误'}` };
       }
     }
     
@@ -396,6 +408,7 @@ function parseSearchResult(data) {
     }
     return {
       success: true,
+      data_version: '1.1',
       total: data.total || data.totalCount || data.totalResults || products.length,
       page: data.page || data.pageNo || 1,
       pageSize: data.pageSize || 20,
